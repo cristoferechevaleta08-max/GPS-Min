@@ -27,6 +27,10 @@ App móvil (React Native + Expo) que muestra tu ubicación en el mapa, calcula *
 
 > Nota: el teléfono y la computadora deben estar en la misma red Wi-Fi.
 
+## APK automático con GitHub Actions
+
+Cada push a `main` compila automáticamente un **APK release** (con todo el JavaScript incluido: se instala y abre directamente, sin npm ni servidor de desarrollo). Descárgalo de la sección **Artifacts** de la última ejecución en la pestaña **Actions** del repo.
+
 ## Generar el APK (Android)
 
 Con [EAS Build](https://docs.expo.dev/build/introduction/) puedes empaquetar la app para instalarla sin Expo Go:
