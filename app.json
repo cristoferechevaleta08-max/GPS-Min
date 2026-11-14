@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "GPS Min",
+    "slug": "gps-min",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#ffffff",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Usamos tu ubicación para mostrar rutas hacia tu destino.",
+        "NSMotionUsageDescription": "Usamos el sensor de movimiento para contar tus pasos."
+      }
+    },
+    "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACTIVITY_RECOGNITION"
+      ]
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Usamos tu ubicación para mostrar rutas hacia tu destino."
+        }
+      ]
+    ]
+  }
+}
