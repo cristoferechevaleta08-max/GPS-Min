@@ -34,7 +34,8 @@
         {
           "locationWhenInUsePermission": "Usamos tu ubicación para mostrar rutas hacia tu destino."
         }
-      ]
+      ],
+      "expo-asset"
     ]
   }
 }
