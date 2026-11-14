@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
   ScrollView,
   StyleSheet,
@@ -40,6 +41,7 @@ export default function App() {
   const locationWatchRef = useRef(null);
   const stepsBaseRef = useRef(0);
   const lastStepsUpdateRef = useRef(0);
+  const panelMeasuredOnce = useRef(false);
 
   const [location, setLocation] = useState(null);
   const [locationError, setLocationError] = useState(null);
@@ -57,13 +59,95 @@ export default function App() {
   const [stepsAvailable, setStepsAvailable] = useState(false);
 
   const [webReady, setWebReady] = useState(false);
-  const [panelHeight, setPanelHeight] = useState(0);
+
+  const [expanded, setExpanded] = useState(false);
+  const [contentHeight, setContentHeight] = useState(0);
+  const [collapsedHeight, setCollapsedHeight] = useState(0);
+  const panelHeightAnim = useRef(new Animated.Value(0)).current;
+
+  const introOpacity = useRef(new Animated.Value(1)).current;
+  const introScale = useRef(new Animated.Value(0.5)).current;
+  const [introDone, setIntroDone] = useState(false);
+
+  const searchSlide = useRef(new Animated.Value(-140)).current;
+  const panelSlide = useRef(new Animated.Value(360)).current;
+  const fabScale = useRef(new Animated.Value(0)).current;
 
   const hasRoute = routes.length > 0;
 
   const postToMap = useCallback((script) => {
     webViewRef.current?.injectJavaScript(`${script}; true;`);
   }, []);
+
+  useEffect(() => {
+    Animated.sequence([
+      Animated.spring(introScale, {
+        toValue: 1,
+        friction: 6,
+        tension: 60,
+        useNativeDriver: true,
+      }),
+      Animated.delay(900),
+      Animated.timing(introOpacity, {
+        toValue: 0,
+        duration: 450,
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (finished) setIntroDone(true);
+    });
+
+    Animated.sequence([
+      Animated.delay(350),
+      Animated.stagger(180, [
+        Animated.spring(searchSlide, {
+          toValue: 0,
+          friction: 7,
+          tension: 55,
+          useNativeDriver: true,
+        }),
+        Animated.spring(panelSlide, {
+          toValue: 0,
+          friction: 8,
+          tension: 50,
+          useNativeDriver: true,
+        }),
+        Animated.spring(fabScale, {
+          toValue: 1,
+          friction: 7,
+          tension: 60,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, [introOpacity, introScale, searchSlide, panelSlide, fabScale]);
+
+  useEffect(() => {
+    if (!contentHeight || !collapsedHeight) return;
+    const target = expanded ? contentHeight : collapsedHeight;
+    if (!panelMeasuredOnce.current) {
+      panelMeasuredOnce.current = true;
+      panelHeightAnim.setValue(target);
+      return;
+    }
+    Animated.spring(panelHeightAnim, {
+      toValue: target,
+      friction: 10,
+      tension: 70,
+      useNativeDriver: false,
+    }).start();
+  }, [expanded, contentHeight, collapsedHeight, panelHeightAnim]);
+
+  useEffect(() => {
+    setExpanded(hasRoute);
+    if (!hasRoute) setShowStepsList(false);
+  }, [hasRoute]);
+
+  useEffect(() => {
+    if (!hasRoute) return;
+    activateKeepAwakeAsync();
+    return () => deactivateKeepAwake();
+  }, [hasRoute]);
 
   useEffect(() => {
     let active = true;
@@ -138,12 +222,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!hasRoute) return;
-    activateKeepAwakeAsync();
-    return () => deactivateKeepAwake();
-  }, [hasRoute]);
-
-  useEffect(() => {
     if (webReady && location) {
       postToMap(`window.setUserLocation(${location.latitude}, ${location.longitude})`);
     }
@@ -184,22 +262,21 @@ export default function App() {
     return { ...currentRoute.steps[index], index };
   }, [currentRoute, location]);
 
-  const handleMapMessage = useCallback(
-    (event) => {
-      try {
-        const msg = JSON.parse(event.nativeEvent.data);
-        if (msg.type === 'ready') {
-          setWebReady(true);
-        } else if (msg.type === 'destination') {
-          setDestinationFromCoords({ latitude: msg.lat, longitude: msg.lng });
-        } else if (msg.type === 'selectRoute') {
-          setSelectedRoute(msg.index);
-          setShowStepsList(false);
-        }
-      } catch (error) {}
-    },
-    []
-  );
+  const fabBottom = (expanded ? contentHeight : collapsedHeight) + 40;
+
+  const handleMapMessage = useCallback((event) => {
+    try {
+      const msg = JSON.parse(event.nativeEvent.data);
+      if (msg.type === 'ready') {
+        setWebReady(true);
+      } else if (msg.type === 'destination') {
+        setDestinationFromCoords({ latitude: msg.lat, longitude: msg.lng });
+      } else if (msg.type === 'selectRoute') {
+        setSelectedRoute(msg.index);
+        setShowStepsList(false);
+      }
+    } catch (error) {}
+  }, []);
 
   const setDestinationFromCoords = useCallback(
     (coords) => {
@@ -274,6 +351,11 @@ export default function App() {
     postToMap('window.centerOnUser()');
   }, [postToMap]);
 
+  const openWithSteps = useCallback(() => {
+    setExpanded(true);
+    setShowStepsList(true);
+  }, []);
+
   const canSearch = query.trim().length >= 3;
 
   return (
@@ -290,235 +372,283 @@ export default function App() {
         onMessage={handleMapMessage}
       />
 
-      <View style={styles.searchBox}>
-        <Ionicons name="search" size={18} color="#95a5a6" />
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Buscar dirección de destino…"
-          placeholderTextColor="#b0bec5"
-          value={query}
-          onChangeText={setQuery}
-          onSubmitEditing={handleSearch}
-          returnKeyType="search"
-          autoCorrect={false}
-          clearButtonMode="never"
-        />
-        {query.length > 0 && !searching && (
-          <TouchableOpacity
-            style={styles.iconButton}
-            onPress={clearSearch}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Ionicons name="close-circle" size={18} color="#b0bec5" />
-          </TouchableOpacity>
-        )}
-        {searching ? (
-          <ActivityIndicator size="small" color="#2980b9" style={styles.iconButton} />
-        ) : (
-          <TouchableOpacity
-            style={styles.iconButton}
-            onPress={handleSearch}
-            disabled={!canSearch}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Ionicons
-              name="arrow-forward-circle"
-              size={28}
-              color={canSearch ? '#2980b9' : '#d5dbdb'}
-            />
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {results.length > 0 && (
-        <View style={styles.resultsBox}>
-          <ScrollView keyboardShouldPersistTaps="handled">
-            {results.map((place) => (
-              <TouchableOpacity
-                key={place.id}
-                style={styles.resultRow}
-                activeOpacity={0.6}
-                onPress={() => handleSelectPlace(place)}
-              >
-                <View style={styles.resultIcon}>
-                  <Ionicons name="location-outline" size={18} color="#2980b9" />
-                </View>
-                <View style={styles.resultTexts}>
-                  <Text style={styles.resultName} numberOfLines={1}>
-                    {place.name}
-                  </Text>
-                  <Text style={styles.resultAddress} numberOfLines={2}>
-                    {place.address}
-                  </Text>
-                </View>
-                <Ionicons name="chevron-forward" size={16} color="#b0bec5" />
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+      <Animated.View
+        style={[styles.searchBoxWrap, { transform: [{ translateY: searchSlide }] }]}
+      >
+        <View style={styles.searchBox}>
+          <Ionicons name="search" size={18} color="#95a5a6" />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Buscar dirección de destino…"
+            placeholderTextColor="#b0bec5"
+            value={query}
+            onChangeText={setQuery}
+            onSubmitEditing={handleSearch}
+            returnKeyType="search"
+            autoCorrect={false}
+            clearButtonMode="never"
+          />
+          {query.length > 0 && !searching && (
+            <TouchableOpacity
+              style={styles.iconButton}
+              onPress={clearSearch}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="close-circle" size={18} color="#b0bec5" />
+            </TouchableOpacity>
+          )}
+          {searching ? (
+            <ActivityIndicator size="small" color="#2980b9" style={styles.iconButton} />
+          ) : (
+            <TouchableOpacity
+              style={styles.iconButton}
+              onPress={handleSearch}
+              disabled={!canSearch}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons
+                name="arrow-forward-circle"
+                size={28}
+                color={canSearch ? '#2980b9' : '#d5dbdb'}
+              />
+            </TouchableOpacity>
+          )}
         </View>
-      )}
+
+        {results.length > 0 && (
+          <View style={styles.resultsBox}>
+            <ScrollView keyboardShouldPersistTaps="handled">
+              {results.map((place) => (
+                <TouchableOpacity
+                  key={place.id}
+                  style={styles.resultRow}
+                  activeOpacity={0.6}
+                  onPress={() => handleSelectPlace(place)}
+                >
+                  <View style={styles.resultIcon}>
+                    <Ionicons name="location-outline" size={18} color="#2980b9" />
+                  </View>
+                  <View style={styles.resultTexts}>
+                    <Text style={styles.resultName} numberOfLines={1}>
+                      {place.name}
+                    </Text>
+                    <Text style={styles.resultAddress} numberOfLines={2}>
+                      {place.address}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color="#b0bec5" />
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+      </Animated.View>
 
       {location && !locationError && (
-        <TouchableOpacity
-          style={[styles.fab, { bottom: panelHeight + 40 }]}
-          activeOpacity={0.7}
-          onPress={centerOnUser}
+        <Animated.View
+          style={[styles.fab, { bottom: fabBottom, transform: [{ scale: fabScale }] }]}
         >
-          <Ionicons name="locate" size={24} color="#fff" />
-        </TouchableOpacity>
+          <TouchableOpacity style={styles.fabButton} activeOpacity={0.7} onPress={centerOnUser}>
+            <Ionicons name="locate" size={24} color="#fff" />
+          </TouchableOpacity>
+        </Animated.View>
       )}
 
-      <View style={styles.panel} onLayout={(e) => setPanelHeight(e.nativeEvent.layout.height)}>
-        {locationError ? (
-          <View style={styles.errorRow}>
-            <Ionicons name="warning-outline" size={18} color="#c0392b" />
-            <Text style={styles.errorText}>{locationError}</Text>
-          </View>
-        ) : (
-          <View style={styles.row}>
-            <View style={styles.stat}>
-              <View style={styles.statHeader}>
-                <Ionicons name="footsteps" size={16} color="#2980b9" />
-                <Text style={styles.statValue}>{steps.toLocaleString('es-MX')}</Text>
+      <Animated.View
+        style={[styles.panelWrap, { transform: [{ translateY: panelSlide }] }]}
+      >
+        <Animated.View style={[styles.panel, { height: panelHeightAnim }]}>
+
+          <View
+            collapsable={false}
+            onLayout={(e) => setCollapsedHeight(e.nativeEvent.layout.height)}
+          >
+            <TouchableOpacity
+              style={styles.grabberWrap}
+              activeOpacity={0.7}
+              onPress={() => setExpanded((value) => !value)}
+            >
+              <View style={styles.grabber} />
+            </TouchableOpacity>
+
+            {locationError ? (
+              <View style={styles.errorRow}>
+                <Ionicons name="warning-outline" size={18} color="#c0392b" />
+                <Text style={styles.errorText}>{locationError}</Text>
               </View>
-              <Text style={styles.statLabel}>
-                pasos hoy {stepsAvailable ? '' : '(sensor no disponible)'}
-              </Text>
-            </View>
-            {currentRoute && (
-              <View style={[styles.stat, styles.statRight]}>
-                <View style={styles.statHeader}>
-                  <Ionicons name="map" size={16} color="#27ae60" />
-                  <Text style={styles.statValue}>
-                    {formatDistance(currentRoute.distance)}
+            ) : (
+              <View style={styles.row}>
+                <View style={styles.stat}>
+                  <View style={styles.statHeader}>
+                    <Ionicons name="footsteps" size={16} color="#2980b9" />
+                    <Text style={styles.statValue}>{steps.toLocaleString('es-MX')}</Text>
+                  </View>
+                  <Text style={styles.statLabel}>
+                    pasos hoy {stepsAvailable ? '' : '(sensor no disponible)'}
                   </Text>
                 </View>
-                <Text style={styles.statLabel}>
-                  ruta {selectedRoute + 1} · {formatDuration(currentRoute.duration)}
-                </Text>
+                {currentRoute && (
+                  <View style={[styles.stat, styles.statRight]}>
+                    <View style={styles.statHeader}>
+                      <Ionicons name="map" size={16} color="#27ae60" />
+                      <Text style={styles.statValue}>
+                        {formatDistance(currentRoute.distance)}
+                      </Text>
+                    </View>
+                    <Text style={styles.statLabel}>
+                      ruta {selectedRoute + 1} · {formatDuration(currentRoute.duration)}
+                    </Text>
+                  </View>
+                )}
               </View>
             )}
-          </View>
-        )}
 
-        {loadingRoute && (
-          <View style={styles.loadingRow}>
-            <ActivityIndicator size="small" color="#2980b9" />
-            <Text style={styles.loadingText}>Calculando rutas…</Text>
-          </View>
-        )}
-
-        {routes.length > 1 && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.routeOptions}
-          >
-            {routes.map((route, index) => (
+            {currentInstruction && (
               <TouchableOpacity
-                key={`option-${index}`}
-                style={[
-                  styles.routeOption,
-                  index === selectedRoute && styles.routeOptionActive,
-                ]}
+                style={styles.instructionBanner}
                 activeOpacity={0.7}
-                onPress={() => {
-                  setSelectedRoute(index);
-                  setShowStepsList(false);
-                }}
+                onPress={openWithSteps}
               >
-                <Ionicons
-                  name={index === selectedRoute ? 'navigate' : 'map-outline'}
-                  size={14}
-                  color={index === selectedRoute ? '#2980b9' : '#546e7a'}
-                />
-                <Text
-                  style={[
-                    styles.routeOptionText,
-                    index === selectedRoute && styles.routeOptionTextActive,
-                  ]}
-                >
-                  {formatDistance(route.distance)} · {formatDuration(route.duration)}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
-
-        {currentInstruction && !showStepsList && (
-          <View style={styles.instructionBanner}>
-            <View style={styles.instructionIcon}>
-              <ManeuverIcon icon={currentInstruction.icon} size={20} color="#21618c" />
-            </View>
-            <View style={styles.instructionTexts}>
-              <Text style={styles.instructionText}>{currentInstruction.text}</Text>
-              <Text style={styles.instructionDistance}>
-                en {formatDistance(currentInstruction.distance)}
-              </Text>
-            </View>
-          </View>
-        )}
-
-        {currentRoute && currentRoute.steps.length > 0 && (
-          <TouchableOpacity
-            style={styles.linkButton}
-            activeOpacity={0.6}
-            onPress={() => setShowStepsList((value) => !value)}
-          >
-            <Ionicons name="list" size={15} color="#2980b9" />
-            <Text style={styles.linkButtonText}>
-              {showStepsList ? 'Ocultar pasos' : 'Ver todos los pasos'}
-            </Text>
-            <Ionicons
-              name={showStepsList ? 'chevron-up' : 'chevron-down'}
-              size={14}
-              color="#2980b9"
-            />
-          </TouchableOpacity>
-        )}
-
-        {showStepsList && currentRoute && (
-          <FlatList
-            data={currentRoute.steps}
-            keyExtractor={(_, index) => `step-${index}`}
-            style={styles.stepsList}
-            initialNumToRender={12}
-            renderItem={({ item, index }) => (
-              <View
-                style={[
-                  styles.stepRow,
-                  currentInstruction &&
-                    index === currentInstruction.index &&
-                    styles.stepRowActive,
-                ]}
-              >
-                <View style={styles.stepIcon}>
-                  <ManeuverIcon icon={item.icon} size={16} color="#2980b9" />
+                <View style={styles.instructionIcon}>
+                  <ManeuverIcon icon={currentInstruction.icon} size={20} color="#21618c" />
                 </View>
-                <Text style={styles.stepText}>{item.text}</Text>
-                <Text style={styles.stepDistance}>{formatDistance(item.distance)}</Text>
+                <View style={styles.instructionTexts}>
+                  <Text style={styles.instructionText}>{currentInstruction.text}</Text>
+                  <Text style={styles.instructionDistance}>
+                    en {formatDistance(currentInstruction.distance)}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-up" size={16} color="#5499c7" />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View
+            collapsable={false}
+            onLayout={(e) =>
+              setContentHeight(e.nativeEvent.layout.height + collapsedHeight)
+            }
+          >
+            {loadingRoute && (
+              <View style={styles.loadingRow}>
+                <ActivityIndicator size="small" color="#2980b9" />
+                <Text style={styles.loadingText}>Calculando rutas…</Text>
               </View>
             )}
-          />
-        )}
 
-        {!hasRoute && !loadingRoute && !locationError && (
-          <Text style={styles.hint}>
-            Busca una dirección o mantén presionado el mapa para trazar la ruta.
-          </Text>
-        )}
+            {routes.length > 1 && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={styles.routeOptions}
+              >
+                {routes.map((route, index) => (
+                  <TouchableOpacity
+                    key={`option-${index}`}
+                    style={[
+                      styles.routeOption,
+                      index === selectedRoute && styles.routeOptionActive,
+                    ]}
+                    activeOpacity={0.7}
+                    onPress={() => {
+                      setSelectedRoute(index);
+                      setShowStepsList(false);
+                    }}
+                  >
+                    <Ionicons
+                      name={index === selectedRoute ? 'navigate' : 'map-outline'}
+                      size={14}
+                      color={index === selectedRoute ? '#2980b9' : '#546e7a'}
+                    />
+                    <Text
+                      style={[
+                        styles.routeOptionText,
+                        index === selectedRoute && styles.routeOptionTextActive,
+                      ]}
+                    >
+                      {formatDistance(route.distance)} · {formatDuration(route.duration)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
 
-        {hasRoute && (
-          <TouchableOpacity
-            style={styles.clearButton}
-            activeOpacity={0.7}
-            onPress={clearRoute}
-          >
-            <Ionicons name="trash-outline" size={16} color="#c0392b" />
-            <Text style={styles.clearButtonText}>Limpiar ruta</Text>
-          </TouchableOpacity>
-        )}
-      </View>
+            {currentRoute && currentRoute.steps.length > 0 && (
+              <TouchableOpacity
+                style={styles.linkButton}
+                activeOpacity={0.6}
+                onPress={() => setShowStepsList((value) => !value)}
+              >
+                <Ionicons name="list" size={15} color="#2980b9" />
+                <Text style={styles.linkButtonText}>
+                  {showStepsList ? 'Ocultar pasos' : 'Ver todos los pasos'}
+                </Text>
+                <Ionicons
+                  name={showStepsList ? 'chevron-up' : 'chevron-down'}
+                  size={14}
+                  color="#2980b9"
+                />
+              </TouchableOpacity>
+            )}
+
+            {showStepsList && currentRoute && (
+              <FlatList
+                data={currentRoute.steps}
+                keyExtractor={(_, index) => `step-${index}`}
+                style={styles.stepsList}
+                initialNumToRender={12}
+                renderItem={({ item, index }) => (
+                  <View
+                    style={[
+                      styles.stepRow,
+                      currentInstruction &&
+                        index === currentInstruction.index &&
+                        styles.stepRowActive,
+                    ]}
+                  >
+                    <View style={styles.stepIcon}>
+                      <ManeuverIcon icon={item.icon} size={16} color="#2980b9" />
+                    </View>
+                    <Text style={styles.stepText}>{item.text}</Text>
+                    <Text style={styles.stepDistance}>
+                      {formatDistance(item.distance)}
+                    </Text>
+                  </View>
+                )}
+              />
+            )}
+
+            {!hasRoute && !loadingRoute && !locationError && (
+              <Text style={styles.hint}>
+                Busca una dirección o mantén presionado el mapa para trazar la ruta.
+              </Text>
+            )}
+
+            {hasRoute && (
+              <TouchableOpacity
+                style={styles.clearButton}
+                activeOpacity={0.7}
+                onPress={clearRoute}
+              >
+                <Ionicons name="trash-outline" size={16} color="#c0392b" />
+                <Text style={styles.clearButtonText}>Limpiar ruta</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </Animated.View>
+      </Animated.View>
+
+      {!introDone && (
+        <Animated.View style={[styles.intro, { opacity: introOpacity }]} pointerEvents="none">
+          <Animated.View style={[styles.introCard, { transform: [{ scale: introScale }] }]}>
+            <View style={styles.introLogo}>
+              <Ionicons name="navigate" size={44} color="#fff" />
+            </View>
+            <Text style={styles.introTitle}>GPS Min</Text>
+            <Text style={styles.introSubtitle}>Rutas cortas · Navegación · Pasos</Text>
+          </Animated.View>
+        </Animated.View>
+      )}
     </View>
   );
 }
@@ -531,11 +661,13 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
-  searchBox: {
+  searchBoxWrap: {
     position: 'absolute',
     top: 16,
     left: 16,
     right: 16,
+  },
+  searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
@@ -559,13 +691,11 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   resultsBox: {
-    position: 'absolute',
-    top: 72,
-    left: 16,
-    right: 16,
+    marginTop: 8,
     maxHeight: 220,
     backgroundColor: '#fff',
     borderRadius: 14,
+    overflow: 'hidden',
     shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowRadius: 8,
@@ -606,6 +736,8 @@ const styles = StyleSheet.create({
   fab: {
     position: 'absolute',
     right: 16,
+  },
+  fabButton: {
     width: 52,
     height: 52,
     borderRadius: 26,
@@ -618,25 +750,37 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 3 },
     elevation: 8,
   },
-  panel: {
+  panelWrap: {
     position: 'absolute',
     bottom: 24,
     left: 16,
     right: 16,
-    maxHeight: 420,
+  },
+  panel: {
     backgroundColor: '#fff',
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 16,
+    overflow: 'hidden',
     shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 4 },
     elevation: 6,
   },
+  grabberWrap: {
+    alignItems: 'center',
+    paddingVertical: 2,
+    marginBottom: 10,
+  },
+  grabber: {
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#d5dbdb',
+  },
   row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 8,
   },
   stat: {
     flex: 1,
@@ -663,14 +807,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    marginTop: 12,
   },
   loadingText: {
     fontSize: 13,
     color: '#2980b9',
   },
   routeOptions: {
-    marginBottom: 8,
+    marginTop: 12,
   },
   routeOption: {
     flexDirection: 'row',
@@ -701,7 +845,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#eaf4fb',
     borderRadius: 12,
     padding: 10,
-    marginBottom: 8,
+    marginTop: 10,
     gap: 10,
   },
   instructionIcon: {
@@ -730,7 +874,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    paddingVertical: 6,
+    paddingVertical: 8,
   },
   linkButtonText: {
     fontSize: 13,
@@ -772,13 +916,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#95a5a6',
     textAlign: 'center',
-    marginTop: 4,
+    marginTop: 12,
   },
   errorRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
   },
   errorText: {
     flex: 1,
@@ -790,7 +933,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    marginTop: 10,
+    marginTop: 12,
     backgroundColor: '#fdecea',
     borderRadius: 10,
     paddingVertical: 10,
@@ -799,5 +942,38 @@ const styles = StyleSheet.create({
     color: '#c0392b',
     fontWeight: '600',
     fontSize: 14,
+  },
+  intro: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#eaf4fb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  introCard: {
+    alignItems: 'center',
+  },
+  introLogo: {
+    width: 104,
+    height: 104,
+    borderRadius: 52,
+    backgroundColor: '#2980b9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#2980b9',
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 10,
+  },
+  introTitle: {
+    fontSize: 30,
+    fontWeight: '800',
+    color: '#21618c',
+    marginTop: 18,
+  },
+  introSubtitle: {
+    fontSize: 14,
+    color: '#5499c7',
+    marginTop: 6,
   },
 });
