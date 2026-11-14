@@ -6,6 +6,12 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "backgroundColor": "#ffffff",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#eaf4fb"
+    },
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
@@ -14,6 +20,10 @@
       }
     },
     "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#2980b9"
+      },
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
@@ -28,15 +38,25 @@
       ],
       "package": "com.anonymous.gpsmin"
     },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 180,
+          "resizeMode": "contain",
+          "backgroundColor": "#eaf4fb"
+        }
+      ],
       [
         "expo-location",
         {
           "locationWhenInUsePermission": "Usamos tu ubicación para mostrar rutas hacia tu destino."
         }
-      ],
-      "expo-asset",
-      "expo-font"
+      ]
     ]
   }
 }

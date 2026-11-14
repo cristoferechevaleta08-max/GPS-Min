@@ -1,0 +1,7 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <path d="M 512 372 L 742 878 L 512 734 L 282 878 Z"
+        fill="#000000" opacity="0.18" transform="translate(0 16)"/>
+  <path d="M 512 372 L 742 878 L 512 734 L 282 878 Z"
+        fill="#ffffff"/>
+  <circle cx="788" cy="232" r="52" fill="#e74c3c" stroke="#ffffff" stroke-width="16"/>
+</svg>
