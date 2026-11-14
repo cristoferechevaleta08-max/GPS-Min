@@ -1,4 +1,5 @@
 const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving';
+const REQUEST_TIMEOUT_MS = 15000;
 
 const MODIFIER_TEXT = {
   left: 'a la izquierda',
@@ -10,6 +11,35 @@ const MODIFIER_TEXT = {
   straight: 'recto',
   uturn: 'en U',
 };
+
+function maneuverIcon({ type, modifier }) {
+  if (type === 'arrive') return { name: 'flag', rotate: 0 };
+  if (type === 'depart') return { name: 'navigate', rotate: 0 };
+  if (
+    type === 'roundabout' ||
+    type === 'rotary' ||
+    type === 'roundabout turn' ||
+    type === 'exit roundabout' ||
+    type === 'exit rotary'
+  ) {
+    return { name: 'sync', rotate: 0 };
+  }
+  if (type === 'on ramp') return { name: 'log-in-outline', rotate: 0 };
+  if (type === 'off ramp') return { name: 'log-out-outline', rotate: 0 };
+  if (type === 'merge' || type === 'fork') {
+    return { name: 'git-network-outline', rotate: 0 };
+  }
+  if (type === 'uturn' || modifier === 'uturn') {
+    return { name: 'return-up-back', rotate: 0 };
+  }
+  if (modifier === 'left') return { name: 'arrow-back', rotate: 0 };
+  if (modifier === 'right') return { name: 'arrow-forward', rotate: 0 };
+  if (modifier === 'slight left') return { name: 'arrow-up', rotate: -45 };
+  if (modifier === 'slight right') return { name: 'arrow-up', rotate: 45 };
+  if (modifier === 'sharp left') return { name: 'arrow-back', rotate: -45 };
+  if (modifier === 'sharp right') return { name: 'arrow-forward', rotate: 45 };
+  return { name: 'arrow-up', rotate: 0 };
+}
 
 function instructionText(step) {
   const road = step.name ? ` en ${step.name}` : '';
@@ -52,7 +82,18 @@ function buildSteps(osrmSteps) {
     distance: step.distance,
     lat: step.maneuver.location[1],
     lon: step.maneuver.location[0],
+    icon: maneuverIcon(step.maneuver),
   }));
+}
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function fetchRoutes(origin, dest) {
@@ -60,8 +101,16 @@ export async function fetchRoutes(origin, dest) {
     `${OSRM_BASE}/` +
     `${origin.longitude},${origin.latitude};${dest.longitude},${dest.latitude}` +
     `?overview=full&geometries=geojson&alternatives=2&steps=true`;
-  const response = await fetch(url);
-  const data = await response.json();
+  let data;
+  try {
+    const response = await fetchWithTimeout(url);
+    data = await response.json();
+  } catch (error) {
+    if (error && error.name === 'AbortError') {
+      throw new Error('El servidor de rutas tardó demasiado. Revisa tu conexión e intenta de nuevo.');
+    }
+    throw new Error('No se pudo conectar con el servidor de rutas.');
+  }
   if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
     throw new Error('No se encontró una ruta hacia ese destino.');
   }

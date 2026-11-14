@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   ScrollView,
   StyleSheet,
   Text,
@@ -10,8 +11,10 @@ import {
   View,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { Pedometer } from 'expo-sensors';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { StatusBar } from 'expo-status-bar';
 import {
   fetchRoutes,
@@ -22,9 +25,21 @@ import {
 import { searchPlaces } from './src/geocoding';
 import { MAP_HTML } from './src/mapHtml';
 
+const STEPS_UPDATE_INTERVAL_MS = 2000;
+
+function ManeuverIcon({ icon, size, color }) {
+  return (
+    <View style={{ transform: [{ rotate: `${icon.rotate}deg` }] }}>
+      <Ionicons name={icon.name} size={size} color={color} />
+    </View>
+  );
+}
+
 export default function App() {
   const webViewRef = useRef(null);
   const locationWatchRef = useRef(null);
+  const stepsBaseRef = useRef(0);
+  const lastStepsUpdateRef = useRef(0);
 
   const [location, setLocation] = useState(null);
   const [locationError, setLocationError] = useState(null);
@@ -42,10 +57,13 @@ export default function App() {
   const [stepsAvailable, setStepsAvailable] = useState(false);
 
   const [webReady, setWebReady] = useState(false);
+  const [panelHeight, setPanelHeight] = useState(0);
 
-  const postToMap = (script) => {
+  const hasRoute = routes.length > 0;
+
+  const postToMap = useCallback((script) => {
     webViewRef.current?.injectJavaScript(`${script}; true;`);
-  };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -100,11 +118,16 @@ export default function App() {
       startOfDay.setHours(0, 0, 0, 0);
       const result = await Pedometer.getStepCountAsync(startOfDay);
       if (!active) return;
-      const baseSteps = result.steps;
-      setSteps(baseSteps);
+      stepsBaseRef.current = result.steps;
+      setSteps(result.steps);
 
       subscription = Pedometer.watchStepCount((data) => {
-        setSteps(baseSteps + data.steps);
+        const total = stepsBaseRef.current + data.steps;
+        const now = Date.now();
+        if (now - lastStepsUpdateRef.current >= STEPS_UPDATE_INTERVAL_MS) {
+          lastStepsUpdateRef.current = now;
+          setSteps(total);
+        }
       });
     })();
 
@@ -115,10 +138,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!hasRoute) return;
+    activateKeepAwakeAsync();
+    return () => deactivateKeepAwake();
+  }, [hasRoute]);
+
+  useEffect(() => {
     if (webReady && location) {
       postToMap(`window.setUserLocation(${location.latitude}, ${location.longitude})`);
     }
-  }, [location, webReady]);
+  }, [location, webReady, postToMap]);
 
   useEffect(() => {
     if (!webReady) return;
@@ -130,7 +159,12 @@ export default function App() {
     } else {
       postToMap('window.clearRoutes()');
     }
-  }, [webReady, routes, selectedRoute]);
+  }, [webReady, routes, postToMap]);
+
+  useEffect(() => {
+    if (!webReady || routes.length === 0) return;
+    postToMap(`window.setSelected(${selectedRoute})`);
+  }, [webReady, selectedRoute, routes.length, postToMap]);
 
   useEffect(() => {
     if (!webReady) return;
@@ -139,9 +173,9 @@ export default function App() {
     } else {
       postToMap('window.clearDestination()');
     }
-  }, [webReady, destination]);
+  }, [webReady, destination, postToMap]);
 
-  const currentRoute = routes.length > 0 ? routes[selectedRoute] : null;
+  const currentRoute = hasRoute ? routes[selectedRoute] : null;
 
   const currentInstruction = useMemo(() => {
     if (!currentRoute || !location) return null;
@@ -150,54 +184,36 @@ export default function App() {
     return { ...currentRoute.steps[index], index };
   }, [currentRoute, location]);
 
-  const handleMapMessage = (event) => {
-    try {
-      const msg = JSON.parse(event.nativeEvent.data);
-      if (msg.type === 'ready') {
-        setWebReady(true);
-      } else if (msg.type === 'destination') {
-        setDestinationFromCoords({ latitude: msg.lat, longitude: msg.lng });
-      } else if (msg.type === 'selectRoute') {
-        setSelectedRoute(msg.index);
-        setShowStepsList(false);
+  const handleMapMessage = useCallback(
+    (event) => {
+      try {
+        const msg = JSON.parse(event.nativeEvent.data);
+        if (msg.type === 'ready') {
+          setWebReady(true);
+        } else if (msg.type === 'destination') {
+          setDestinationFromCoords({ latitude: msg.lat, longitude: msg.lng });
+        } else if (msg.type === 'selectRoute') {
+          setSelectedRoute(msg.index);
+          setShowStepsList(false);
+        }
+      } catch (error) {}
+    },
+    []
+  );
+
+  const setDestinationFromCoords = useCallback(
+    (coords) => {
+      if (!location) {
+        Alert.alert('Espera', 'Aún no tenemos tu ubicación. Activa el GPS e inténtalo de nuevo.');
+        return;
       }
-    } catch (error) {}
-  };
+      setDestination(coords);
+      loadRoutes(location, coords);
+    },
+    [location]
+  );
 
-  const setDestinationFromCoords = (coords) => {
-    if (!location) {
-      Alert.alert('Espera', 'Aún no tenemos tu ubicación. Activa el GPS e inténtalo de nuevo.');
-      return;
-    }
-    setDestination(coords);
-    loadRoutes(location, coords);
-  };
-
-  const handleSearch = async () => {
-    const trimmed = query.trim();
-    if (trimmed.length < 3) return;
-    setSearching(true);
-    setResults([]);
-    try {
-      const places = await searchPlaces(trimmed);
-      if (places.length === 0) {
-        Alert.alert('Sin resultados', 'No encontramos esa dirección. Prueba con otra.');
-      }
-      setResults(places);
-    } catch (error) {
-      Alert.alert('Error de búsqueda', error.message);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleSelectPlace = (place) => {
-    setResults([]);
-    setQuery(place.name);
-    setDestinationFromCoords({ latitude: place.latitude, longitude: place.longitude });
-  };
-
-  const loadRoutes = async (origin, dest) => {
+  const loadRoutes = useCallback(async (origin, dest) => {
     setLoadingRoute(true);
     setRoutes([]);
     setSelectedRoute(0);
@@ -211,20 +227,54 @@ export default function App() {
     } finally {
       setLoadingRoute(false);
     }
-  };
+  }, []);
 
-  const clearRoute = () => {
+  const handleSearch = useCallback(async () => {
+    const trimmed = query.trim();
+    if (trimmed.length < 3 || searching) return;
+    setSearching(true);
+    setResults([]);
+    try {
+      const places = await searchPlaces(trimmed);
+      if (places.length === 0) {
+        Alert.alert('Sin resultados', 'No encontramos esa dirección. Prueba con otra.');
+      }
+      setResults(places);
+    } catch (error) {
+      Alert.alert('Error de búsqueda', error.message);
+    } finally {
+      setSearching(false);
+    }
+  }, [query, searching]);
+
+  const handleSelectPlace = useCallback(
+    (place) => {
+      setResults([]);
+      setQuery(place.name);
+      setDestinationFromCoords({ latitude: place.latitude, longitude: place.longitude });
+    },
+    [setDestinationFromCoords]
+  );
+
+  const clearSearch = useCallback(() => {
+    setQuery('');
+    setResults([]);
+  }, []);
+
+  const clearRoute = useCallback(() => {
     setDestination(null);
     setRoutes([]);
     setSelectedRoute(0);
     setShowStepsList(false);
     setQuery('');
     setResults([]);
-  };
+  }, []);
 
-  const centerOnUser = () => {
+  const centerOnUser = useCallback(() => {
     postToMap('window.centerOnUser()');
-  };
+  }, [postToMap]);
+
+  const canSearch = query.trim().length >= 3;
 
   return (
     <View style={styles.container}>
@@ -241,16 +291,43 @@ export default function App() {
       />
 
       <View style={styles.searchBox}>
+        <Ionicons name="search" size={18} color="#95a5a6" />
         <TextInput
           style={styles.searchInput}
           placeholder="Buscar dirección de destino…"
+          placeholderTextColor="#b0bec5"
           value={query}
           onChangeText={setQuery}
           onSubmitEditing={handleSearch}
           returnKeyType="search"
-          clearButtonMode="while-editing"
+          autoCorrect={false}
+          clearButtonMode="never"
         />
-        {searching && <ActivityIndicator size="small" color="#2980b9" />}
+        {query.length > 0 && !searching && (
+          <TouchableOpacity
+            style={styles.iconButton}
+            onPress={clearSearch}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="close-circle" size={18} color="#b0bec5" />
+          </TouchableOpacity>
+        )}
+        {searching ? (
+          <ActivityIndicator size="small" color="#2980b9" style={styles.iconButton} />
+        ) : (
+          <TouchableOpacity
+            style={styles.iconButton}
+            onPress={handleSearch}
+            disabled={!canSearch}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons
+              name="arrow-forward-circle"
+              size={28}
+              color={canSearch ? '#2980b9' : '#d5dbdb'}
+            />
+          </TouchableOpacity>
+        )}
       </View>
 
       {results.length > 0 && (
@@ -260,36 +337,62 @@ export default function App() {
               <TouchableOpacity
                 key={place.id}
                 style={styles.resultRow}
+                activeOpacity={0.6}
                 onPress={() => handleSelectPlace(place)}
               >
-                <Text style={styles.resultName} numberOfLines={1}>
-                  {place.name}
-                </Text>
-                <Text style={styles.resultAddress} numberOfLines={1}>
-                  {place.address}
-                </Text>
+                <View style={styles.resultIcon}>
+                  <Ionicons name="location-outline" size={18} color="#2980b9" />
+                </View>
+                <View style={styles.resultTexts}>
+                  <Text style={styles.resultName} numberOfLines={1}>
+                    {place.name}
+                  </Text>
+                  <Text style={styles.resultAddress} numberOfLines={2}>
+                    {place.address}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color="#b0bec5" />
               </TouchableOpacity>
             ))}
           </ScrollView>
         </View>
       )}
 
-      <View style={styles.panel}>
+      {location && !locationError && (
+        <TouchableOpacity
+          style={[styles.fab, { bottom: panelHeight + 40 }]}
+          activeOpacity={0.7}
+          onPress={centerOnUser}
+        >
+          <Ionicons name="locate" size={24} color="#fff" />
+        </TouchableOpacity>
+      )}
+
+      <View style={styles.panel} onLayout={(e) => setPanelHeight(e.nativeEvent.layout.height)}>
         {locationError ? (
-          <Text style={styles.errorText}>{locationError}</Text>
+          <View style={styles.errorRow}>
+            <Ionicons name="warning-outline" size={18} color="#c0392b" />
+            <Text style={styles.errorText}>{locationError}</Text>
+          </View>
         ) : (
           <View style={styles.row}>
             <View style={styles.stat}>
-              <Text style={styles.statValue}>{steps.toLocaleString('es-MX')}</Text>
+              <View style={styles.statHeader}>
+                <Ionicons name="footsteps" size={16} color="#2980b9" />
+                <Text style={styles.statValue}>{steps.toLocaleString('es-MX')}</Text>
+              </View>
               <Text style={styles.statLabel}>
                 pasos hoy {stepsAvailable ? '' : '(sensor no disponible)'}
               </Text>
             </View>
             {currentRoute && (
-              <View style={styles.stat}>
-                <Text style={styles.statValue}>
-                  {formatDistance(currentRoute.distance)}
-                </Text>
+              <View style={[styles.stat, styles.statRight]}>
+                <View style={styles.statHeader}>
+                  <Ionicons name="map" size={16} color="#27ae60" />
+                  <Text style={styles.statValue}>
+                    {formatDistance(currentRoute.distance)}
+                  </Text>
+                </View>
                 <Text style={styles.statLabel}>
                   ruta {selectedRoute + 1} · {formatDuration(currentRoute.duration)}
                 </Text>
@@ -298,10 +401,19 @@ export default function App() {
           </View>
         )}
 
-        {loadingRoute && <ActivityIndicator size="small" color="#2980b9" />}
+        {loadingRoute && (
+          <View style={styles.loadingRow}>
+            <ActivityIndicator size="small" color="#2980b9" />
+            <Text style={styles.loadingText}>Calculando rutas…</Text>
+          </View>
+        )}
 
         {routes.length > 1 && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.routeOptions}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.routeOptions}
+          >
             {routes.map((route, index) => (
               <TouchableOpacity
                 key={`option-${index}`}
@@ -309,19 +421,24 @@ export default function App() {
                   styles.routeOption,
                   index === selectedRoute && styles.routeOptionActive,
                 ]}
+                activeOpacity={0.7}
                 onPress={() => {
                   setSelectedRoute(index);
                   setShowStepsList(false);
                 }}
               >
+                <Ionicons
+                  name={index === selectedRoute ? 'navigate' : 'map-outline'}
+                  size={14}
+                  color={index === selectedRoute ? '#2980b9' : '#546e7a'}
+                />
                 <Text
                   style={[
                     styles.routeOptionText,
                     index === selectedRoute && styles.routeOptionTextActive,
                   ]}
                 >
-                  Ruta {index + 1} · {formatDistance(route.distance)} ·{' '}
-                  {formatDuration(route.duration)}
+                  {formatDistance(route.distance)} · {formatDuration(route.duration)}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -330,31 +447,44 @@ export default function App() {
 
         {currentInstruction && !showStepsList && (
           <View style={styles.instructionBanner}>
-            <Text style={styles.instructionText}>
-              {currentInstruction.text}
-            </Text>
-            <Text style={styles.instructionDistance}>
-              en {formatDistance(currentInstruction.distance)}
-            </Text>
+            <View style={styles.instructionIcon}>
+              <ManeuverIcon icon={currentInstruction.icon} size={20} color="#21618c" />
+            </View>
+            <View style={styles.instructionTexts}>
+              <Text style={styles.instructionText}>{currentInstruction.text}</Text>
+              <Text style={styles.instructionDistance}>
+                en {formatDistance(currentInstruction.distance)}
+              </Text>
+            </View>
           </View>
         )}
 
         {currentRoute && currentRoute.steps.length > 0 && (
           <TouchableOpacity
             style={styles.linkButton}
+            activeOpacity={0.6}
             onPress={() => setShowStepsList((value) => !value)}
           >
+            <Ionicons name="list" size={15} color="#2980b9" />
             <Text style={styles.linkButtonText}>
               {showStepsList ? 'Ocultar pasos' : 'Ver todos los pasos'}
             </Text>
+            <Ionicons
+              name={showStepsList ? 'chevron-up' : 'chevron-down'}
+              size={14}
+              color="#2980b9"
+            />
           </TouchableOpacity>
         )}
 
         {showStepsList && currentRoute && (
-          <ScrollView style={styles.stepsList}>
-            {currentRoute.steps.map((step, index) => (
+          <FlatList
+            data={currentRoute.steps}
+            keyExtractor={(_, index) => `step-${index}`}
+            style={styles.stepsList}
+            initialNumToRender={12}
+            renderItem={({ item, index }) => (
               <View
-                key={`step-${index}`}
                 style={[
                   styles.stepRow,
                   currentInstruction &&
@@ -362,33 +492,32 @@ export default function App() {
                     styles.stepRowActive,
                 ]}
               >
-                <Text style={styles.stepText}>
-                  {index + 1}. {step.text}
-                </Text>
-                <Text style={styles.stepDistance}>
-                  {formatDistance(step.distance)}
-                </Text>
+                <View style={styles.stepIcon}>
+                  <ManeuverIcon icon={item.icon} size={16} color="#2980b9" />
+                </View>
+                <Text style={styles.stepText}>{item.text}</Text>
+                <Text style={styles.stepDistance}>{formatDistance(item.distance)}</Text>
               </View>
-            ))}
-          </ScrollView>
+            )}
+          />
         )}
 
-        {routes.length === 0 && !loadingRoute && !locationError && (
+        {!hasRoute && !loadingRoute && !locationError && (
           <Text style={styles.hint}>
             Busca una dirección o mantén presionado el mapa para trazar la ruta.
           </Text>
         )}
 
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.secondaryButton} onPress={centerOnUser}>
-            <Text style={styles.secondaryButtonText}>Centrar en mí</Text>
+        {hasRoute && (
+          <TouchableOpacity
+            style={styles.clearButton}
+            activeOpacity={0.7}
+            onPress={clearRoute}
+          >
+            <Ionicons name="trash-outline" size={16} color="#c0392b" />
+            <Text style={styles.clearButtonText}>Limpiar ruta</Text>
           </TouchableOpacity>
-          {routes.length > 0 && (
-            <TouchableOpacity style={styles.button} onPress={clearRoute}>
-              <Text style={styles.buttonText}>Limpiar ruta</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+        )}
       </View>
     </View>
   );
@@ -410,9 +539,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
+    borderRadius: 14,
+    paddingLeft: 12,
+    paddingRight: 4,
     shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowRadius: 8,
@@ -421,18 +550,22 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 12,
     fontSize: 15,
     color: '#2c3e50',
   },
+  iconButton: {
+    paddingHorizontal: 6,
+    paddingVertical: 8,
+  },
   resultsBox: {
     position: 'absolute',
-    top: 68,
+    top: 72,
     left: 16,
     right: 16,
-    maxHeight: 200,
+    maxHeight: 220,
     backgroundColor: '#fff',
-    borderRadius: 12,
+    borderRadius: 14,
     shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowRadius: 8,
@@ -440,10 +573,25 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   resultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#ecf0f1',
+  },
+  resultIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#eaf4fb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  resultTexts: {
+    flex: 1,
+    marginRight: 8,
   },
   resultName: {
     fontSize: 14,
@@ -454,6 +602,21 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#7f8c8d',
     marginTop: 2,
+  },
+  fab: {
+    position: 'absolute',
+    right: 16,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#2980b9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 8,
   },
   panel: {
     position: 'absolute',
@@ -478,6 +641,14 @@ const styles = StyleSheet.create({
   stat: {
     flex: 1,
   },
+  statRight: {
+    alignItems: 'flex-end',
+  },
+  statHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   statValue: {
     fontSize: 22,
     fontWeight: '700',
@@ -488,14 +659,27 @@ const styles = StyleSheet.create({
     color: '#7f8c8d',
     marginTop: 2,
   },
+  loadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  loadingText: {
+    fontSize: 13,
+    color: '#2980b9',
+  },
   routeOptions: {
     marginBottom: 8,
   },
   routeOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     borderColor: '#b0bec5',
     borderWidth: 1,
-    borderRadius: 10,
-    paddingHorizontal: 10,
+    borderRadius: 12,
+    paddingHorizontal: 12,
     paddingVertical: 8,
     marginRight: 8,
   },
@@ -512,10 +696,24 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   instructionBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#eaf4fb',
-    borderRadius: 10,
+    borderRadius: 12,
     padding: 10,
     marginBottom: 8,
+    gap: 10,
+  },
+  instructionIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  instructionTexts: {
+    flex: 1,
   },
   instructionText: {
     fontSize: 14,
@@ -528,7 +726,10 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   linkButton: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
     paddingVertical: 6,
   },
   linkButtonText: {
@@ -542,9 +743,8 @@ const styles = StyleSheet.create({
   },
   stepRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 6,
+    paddingVertical: 8,
     paddingHorizontal: 8,
     borderRadius: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -552,6 +752,11 @@ const styles = StyleSheet.create({
   },
   stepRowActive: {
     backgroundColor: '#eaf4fb',
+  },
+  stepIcon: {
+    width: 24,
+    alignItems: 'center',
+    marginRight: 8,
   },
   stepText: {
     flex: 1,
@@ -569,37 +774,29 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 4,
   },
-  errorText: {
-    fontSize: 13,
-    color: '#c0392b',
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     marginBottom: 8,
   },
-  buttonRow: {
+  errorText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#c0392b',
+  },
+  clearButton: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
     gap: 8,
     marginTop: 10,
-  },
-  button: {
-    flex: 1,
-    backgroundColor: '#2980b9',
+    backgroundColor: '#fdecea',
     borderRadius: 10,
     paddingVertical: 10,
-    alignItems: 'center',
   },
-  buttonText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 14,
-  },
-  secondaryButton: {
-    flex: 1,
-    backgroundColor: '#ecf0f1',
-    borderRadius: 10,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  secondaryButtonText: {
-    color: '#2c3e50',
+  clearButtonText: {
+    color: '#c0392b',
     fontWeight: '600',
     fontSize: 14,
   },

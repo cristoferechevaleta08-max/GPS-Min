@@ -82,6 +82,21 @@ export const MAP_HTML = `<!DOCTYPE html>
     }
   };
 
+  window.setSelected = function (sel) {
+    routeLines.forEach(function (line, i) {
+      line.setStyle({
+        color: i === sel ? '#2980b9' : '#b0bec5',
+        weight: i === sel ? 6 : 3
+      });
+    });
+    if (routeLines[sel]) {
+      map.fitBounds(routeLines[sel].getBounds(), {
+        paddingTopLeft: [40, 170],
+        paddingBottomRight: [40, 320]
+      });
+    }
+  };
+
   window.setDestination = function (lat, lng) {
     var icon = L.divIcon({ className: 'dest-pin', html: '<div class="pin"></div>', iconSize: [22, 22], iconAnchor: [11, 22] });
     if (destMarker) {
