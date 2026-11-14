@@ -1,9 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -11,6 +13,13 @@ import MapView, { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Pedometer } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
+import {
+  fetchRoutes,
+  formatDistance,
+  formatDuration,
+  nearestInstructionIndex,
+} from './src/routing';
+import { searchPlaces } from './src/geocoding';
 
 const INITIAL_REGION = {
   latitude: 19.4326,
@@ -26,9 +35,15 @@ export default function App() {
   const [location, setLocation] = useState(null);
   const [locationError, setLocationError] = useState(null);
   const [destination, setDestination] = useState(null);
-  const [routeCoords, setRouteCoords] = useState([]);
-  const [routeInfo, setRouteInfo] = useState(null);
+  const [routes, setRoutes] = useState([]);
+  const [selectedRoute, setSelectedRoute] = useState(0);
   const [loadingRoute, setLoadingRoute] = useState(false);
+
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+
+  const [showStepsList, setShowStepsList] = useState(false);
   const [steps, setSteps] = useState(0);
   const [stepsAvailable, setStepsAvailable] = useState(false);
 
@@ -100,7 +115,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (location && mapRef.current) {
+    if (location && !destination && mapRef.current) {
       mapRef.current.animateToRegion(
         {
           latitude: location.latitude,
@@ -113,6 +128,44 @@ export default function App() {
     }
   }, [location === null]);
 
+  const currentRoute = routes.length > 0 ? routes[selectedRoute] : null;
+
+  const currentInstruction = useMemo(() => {
+    if (!currentRoute || !location) return null;
+    const index = nearestInstructionIndex(currentRoute, location);
+    if (index === null) return null;
+    return { ...currentRoute.steps[index], index };
+  }, [currentRoute, location]);
+
+  const handleSearch = async () => {
+    const trimmed = query.trim();
+    if (trimmed.length < 3) return;
+    setSearching(true);
+    setResults([]);
+    try {
+      const places = await searchPlaces(trimmed);
+      if (places.length === 0) {
+        Alert.alert('Sin resultados', 'No encontramos esa dirección. Prueba con otra.');
+      }
+      setResults(places);
+    } catch (error) {
+      Alert.alert('Error de búsqueda', error.message);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const handleSelectPlace = (place) => {
+    setResults([]);
+    setQuery(place.name);
+    if (!location) {
+      Alert.alert('Espera', 'Aún no tenemos tu ubicación. Activa el GPS e inténtalo de nuevo.');
+      return;
+    }
+    setDestination({ latitude: place.latitude, longitude: place.longitude });
+    loadRoutes(location, { latitude: place.latitude, longitude: place.longitude });
+  };
+
   const handleLongPress = (event) => {
     const coords = event.nativeEvent.coordinate;
     if (!location) {
@@ -120,33 +173,20 @@ export default function App() {
       return;
     }
     setDestination(coords);
-    fetchRoute(location, coords);
+    loadRoutes(location, coords);
   };
 
-  const fetchRoute = async (origin, dest) => {
+  const loadRoutes = async (origin, dest) => {
     setLoadingRoute(true);
-    setRouteCoords([]);
-    setRouteInfo(null);
+    setRoutes([]);
+    setSelectedRoute(0);
+    setShowStepsList(false);
     try {
-      const url =
-        `https://router.project-osrm.org/route/v1/driving/` +
-        `${origin.longitude},${origin.latitude};${dest.longitude},${dest.latitude}` +
-        `?overview=full&geometries=geojson`;
-      const response = await fetch(url);
-      const data = await response.json();
-      if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
-        throw new Error('No se encontró una ruta hacia ese destino.');
-      }
-      const route = data.routes[0];
-      const coords = route.geometry.coordinates.map(([lon, lat]) => ({
-        latitude: lat,
-        longitude: lon,
-      }));
-      setRouteCoords(coords);
-      setRouteInfo({ distance: route.distance, duration: route.duration });
+      const found = await fetchRoutes(origin, dest);
+      setRoutes(found);
       if (mapRef.current) {
-        mapRef.current.fitToCoordinates(coords, {
-          edgePadding: { top: 80, right: 60, bottom: 220, left: 60 },
+        mapRef.current.fitToCoordinates(found[0].coords, {
+          edgePadding: { top: 160, right: 60, bottom: 260, left: 60 },
           animated: true,
         });
       }
@@ -158,22 +198,24 @@ export default function App() {
     }
   };
 
+  const selectRoute = (index) => {
+    setSelectedRoute(index);
+    setShowStepsList(false);
+    if (mapRef.current && routes[index]) {
+      mapRef.current.fitToCoordinates(routes[index].coords, {
+        edgePadding: { top: 160, right: 60, bottom: 260, left: 60 },
+        animated: true,
+      });
+    }
+  };
+
   const clearRoute = () => {
     setDestination(null);
-    setRouteCoords([]);
-    setRouteInfo(null);
-  };
-
-  const formatDistance = (meters) => {
-    if (meters < 1000) return `${Math.round(meters)} m`;
-    return `${(meters / 1000).toFixed(1)} km`;
-  };
-
-  const formatDuration = (seconds) => {
-    const minutes = Math.round(seconds / 60);
-    if (minutes < 60) return `${minutes} min`;
-    const hours = Math.floor(minutes / 60);
-    return `${hours} h ${minutes % 60} min`;
+    setRoutes([]);
+    setSelectedRoute(0);
+    setShowStepsList(false);
+    setQuery('');
+    setResults([]);
   };
 
   return (
@@ -188,13 +230,54 @@ export default function App() {
         followsUserLocation={false}
         onLongPress={handleLongPress}
       >
+        {routes.map((route, index) => (
+          <Polyline
+            key={`route-${index}`}
+            coordinates={route.coords}
+            strokeWidth={index === selectedRoute ? 6 : 3}
+            strokeColor={index === selectedRoute ? '#2980b9' : '#b0bec5'}
+            tappable
+            onPress={() => selectRoute(index)}
+          />
+        ))}
         {destination && (
           <Marker coordinate={destination} title="Destino" pinColor="#e74c3c" />
         )}
-        {routeCoords.length > 0 && (
-          <Polyline coordinates={routeCoords} strokeWidth={5} strokeColor="#2980b9" />
-        )}
       </MapView>
+
+      <View style={styles.searchBox}>
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Buscar dirección de destino…"
+          value={query}
+          onChangeText={setQuery}
+          onSubmitEditing={handleSearch}
+          returnKeyType="search"
+          clearButtonMode="while-editing"
+        />
+        {searching && <ActivityIndicator size="small" color="#2980b9" />}
+      </View>
+
+      {results.length > 0 && (
+        <View style={styles.resultsBox}>
+          <ScrollView keyboardShouldPersistTaps="handled">
+            {results.map((place) => (
+              <TouchableOpacity
+                key={place.id}
+                style={styles.resultRow}
+                onPress={() => handleSelectPlace(place)}
+              >
+                <Text style={styles.resultName} numberOfLines={1}>
+                  {place.name}
+                </Text>
+                <Text style={styles.resultAddress} numberOfLines={1}>
+                  {place.address}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
 
       <View style={styles.panel}>
         {locationError ? (
@@ -207,11 +290,13 @@ export default function App() {
                 pasos hoy {stepsAvailable ? '' : '(sensor no disponible)'}
               </Text>
             </View>
-            {routeInfo && (
+            {currentRoute && (
               <View style={styles.stat}>
-                <Text style={styles.statValue}>{formatDistance(routeInfo.distance)}</Text>
+                <Text style={styles.statValue}>
+                  {formatDistance(currentRoute.distance)}
+                </Text>
                 <Text style={styles.statLabel}>
-                  ruta · {formatDuration(routeInfo.duration)}
+                  ruta {selectedRoute + 1} · {formatDuration(currentRoute.duration)}
                 </Text>
               </View>
             )}
@@ -220,11 +305,83 @@ export default function App() {
 
         {loadingRoute && <ActivityIndicator size="small" color="#2980b9" />}
 
-        <Text style={styles.hint}>
-          Mantén presionado el mapa para marcar tu destino y ver la ruta más corta.
-        </Text>
+        {routes.length > 1 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.routeOptions}>
+            {routes.map((route, index) => (
+              <TouchableOpacity
+                key={`option-${index}`}
+                style={[
+                  styles.routeOption,
+                  index === selectedRoute && styles.routeOptionActive,
+                ]}
+                onPress={() => selectRoute(index)}
+              >
+                <Text
+                  style={[
+                    styles.routeOptionText,
+                    index === selectedRoute && styles.routeOptionTextActive,
+                  ]}
+                >
+                  Ruta {index + 1} · {formatDistance(route.distance)} ·{' '}
+                  {formatDuration(route.duration)}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        )}
 
-        {routeInfo && (
+        {currentInstruction && !showStepsList && (
+          <View style={styles.instructionBanner}>
+            <Text style={styles.instructionText}>
+              {currentInstruction.text}
+            </Text>
+            <Text style={styles.instructionDistance}>
+              en {formatDistance(currentInstruction.distance)}
+            </Text>
+          </View>
+        )}
+
+        {currentRoute && currentRoute.steps.length > 0 && (
+          <TouchableOpacity
+            style={styles.linkButton}
+            onPress={() => setShowStepsList((value) => !value)}
+          >
+            <Text style={styles.linkButtonText}>
+              {showStepsList ? 'Ocultar pasos' : 'Ver todos los pasos'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {showStepsList && currentRoute && (
+          <ScrollView style={styles.stepsList}>
+            {currentRoute.steps.map((step, index) => (
+              <View
+                key={`step-${index}`}
+                style={[
+                  styles.stepRow,
+                  currentInstruction &&
+                    index === currentInstruction.index &&
+                    styles.stepRowActive,
+                ]}
+              >
+                <Text style={styles.stepText}>
+                  {index + 1}. {step.text}
+                </Text>
+                <Text style={styles.stepDistance}>
+                  {formatDistance(step.distance)}
+                </Text>
+              </View>
+            ))}
+          </ScrollView>
+        )}
+
+        {routes.length === 0 && !loadingRoute && !locationError && (
+          <Text style={styles.hint}>
+            Busca una dirección o mantén presionado el mapa para trazar la ruta.
+          </Text>
+        )}
+
+        {routes.length > 0 && (
           <TouchableOpacity style={styles.button} onPress={clearRoute}>
             <Text style={styles.buttonText}>Limpiar ruta</Text>
           </TouchableOpacity>
@@ -242,11 +399,65 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
+  searchBox: {
+    position: 'absolute',
+    top: 16,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  searchInput: {
+    flex: 1,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: '#2c3e50',
+  },
+  resultsBox: {
+    position: 'absolute',
+    top: 68,
+    left: 16,
+    right: 16,
+    maxHeight: 200,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 6,
+  },
+  resultRow: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#ecf0f1',
+  },
+  resultName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#2c3e50',
+  },
+  resultAddress: {
+    fontSize: 12,
+    color: '#7f8c8d',
+    marginTop: 2,
+  },
   panel: {
     position: 'absolute',
     bottom: 24,
     left: 16,
     right: 16,
+    maxHeight: 420,
     backgroundColor: '#fff',
     borderRadius: 16,
     padding: 16,
@@ -273,6 +484,81 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#7f8c8d',
     marginTop: 2,
+  },
+  routeOptions: {
+    marginBottom: 8,
+  },
+  routeOption: {
+    borderColor: '#b0bec5',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginRight: 8,
+  },
+  routeOptionActive: {
+    borderColor: '#2980b9',
+    backgroundColor: '#eaf4fb',
+  },
+  routeOptionText: {
+    fontSize: 12,
+    color: '#546e7a',
+  },
+  routeOptionTextActive: {
+    color: '#2980b9',
+    fontWeight: '700',
+  },
+  instructionBanner: {
+    backgroundColor: '#eaf4fb',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+  },
+  instructionText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#21618c',
+  },
+  instructionDistance: {
+    fontSize: 12,
+    color: '#5499c7',
+    marginTop: 2,
+  },
+  linkButton: {
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  linkButtonText: {
+    fontSize: 13,
+    color: '#2980b9',
+    fontWeight: '600',
+  },
+  stepsList: {
+    maxHeight: 180,
+    marginTop: 4,
+  },
+  stepRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#ecf0f1',
+  },
+  stepRowActive: {
+    backgroundColor: '#eaf4fb',
+  },
+  stepText: {
+    flex: 1,
+    fontSize: 13,
+    color: '#2c3e50',
+    marginRight: 8,
+  },
+  stepDistance: {
+    fontSize: 12,
+    color: '#7f8c8d',
   },
   hint: {
     fontSize: 13,
