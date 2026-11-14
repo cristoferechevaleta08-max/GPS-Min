@@ -9,7 +9,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
 import { Pedometer } from 'expo-sensors';
 import { StatusBar } from 'expo-status-bar';
@@ -20,16 +20,10 @@ import {
   nearestInstructionIndex,
 } from './src/routing';
 import { searchPlaces } from './src/geocoding';
-
-const INITIAL_REGION = {
-  latitude: 19.4326,
-  longitude: -99.1332,
-  latitudeDelta: 0.01,
-  longitudeDelta: 0.01,
-};
+import { MAP_HTML } from './src/mapHtml';
 
 export default function App() {
-  const mapRef = useRef(null);
+  const webViewRef = useRef(null);
   const locationWatchRef = useRef(null);
 
   const [location, setLocation] = useState(null);
@@ -46,6 +40,12 @@ export default function App() {
   const [showStepsList, setShowStepsList] = useState(false);
   const [steps, setSteps] = useState(0);
   const [stepsAvailable, setStepsAvailable] = useState(false);
+
+  const [webReady, setWebReady] = useState(false);
+
+  const postToMap = (script) => {
+    webViewRef.current?.injectJavaScript(`${script}; true;`);
+  };
 
   useEffect(() => {
     let active = true;
@@ -115,18 +115,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (location && !destination && mapRef.current) {
-      mapRef.current.animateToRegion(
-        {
-          latitude: location.latitude,
-          longitude: location.longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        },
-        500
-      );
+    if (webReady && location) {
+      postToMap(`window.setUserLocation(${location.latitude}, ${location.longitude})`);
     }
-  }, [location === null]);
+  }, [location, webReady]);
+
+  useEffect(() => {
+    if (!webReady) return;
+    if (routes.length > 0) {
+      const data = routes.map((route) => ({
+        coords: route.coords.map((c) => [c.latitude, c.longitude]),
+      }));
+      postToMap(`window.setRoutes(${JSON.stringify(data)}, ${selectedRoute})`);
+    } else {
+      postToMap('window.clearRoutes()');
+    }
+  }, [webReady, routes, selectedRoute]);
+
+  useEffect(() => {
+    if (!webReady) return;
+    if (destination) {
+      postToMap(`window.setDestination(${destination.latitude}, ${destination.longitude})`);
+    } else {
+      postToMap('window.clearDestination()');
+    }
+  }, [webReady, destination]);
 
   const currentRoute = routes.length > 0 ? routes[selectedRoute] : null;
 
@@ -136,6 +149,29 @@ export default function App() {
     if (index === null) return null;
     return { ...currentRoute.steps[index], index };
   }, [currentRoute, location]);
+
+  const handleMapMessage = (event) => {
+    try {
+      const msg = JSON.parse(event.nativeEvent.data);
+      if (msg.type === 'ready') {
+        setWebReady(true);
+      } else if (msg.type === 'destination') {
+        setDestinationFromCoords({ latitude: msg.lat, longitude: msg.lng });
+      } else if (msg.type === 'selectRoute') {
+        setSelectedRoute(msg.index);
+        setShowStepsList(false);
+      }
+    } catch (error) {}
+  };
+
+  const setDestinationFromCoords = (coords) => {
+    if (!location) {
+      Alert.alert('Espera', 'Aún no tenemos tu ubicación. Activa el GPS e inténtalo de nuevo.');
+      return;
+    }
+    setDestination(coords);
+    loadRoutes(location, coords);
+  };
 
   const handleSearch = async () => {
     const trimmed = query.trim();
@@ -158,22 +194,7 @@ export default function App() {
   const handleSelectPlace = (place) => {
     setResults([]);
     setQuery(place.name);
-    if (!location) {
-      Alert.alert('Espera', 'Aún no tenemos tu ubicación. Activa el GPS e inténtalo de nuevo.');
-      return;
-    }
-    setDestination({ latitude: place.latitude, longitude: place.longitude });
-    loadRoutes(location, { latitude: place.latitude, longitude: place.longitude });
-  };
-
-  const handleLongPress = (event) => {
-    const coords = event.nativeEvent.coordinate;
-    if (!location) {
-      Alert.alert('Espera', 'Aún no tenemos tu ubicación. Activa el GPS e inténtalo de nuevo.');
-      return;
-    }
-    setDestination(coords);
-    loadRoutes(location, coords);
+    setDestinationFromCoords({ latitude: place.latitude, longitude: place.longitude });
   };
 
   const loadRoutes = async (origin, dest) => {
@@ -184,28 +205,11 @@ export default function App() {
     try {
       const found = await fetchRoutes(origin, dest);
       setRoutes(found);
-      if (mapRef.current) {
-        mapRef.current.fitToCoordinates(found[0].coords, {
-          edgePadding: { top: 160, right: 60, bottom: 260, left: 60 },
-          animated: true,
-        });
-      }
     } catch (error) {
       setDestination(null);
       Alert.alert('Error de ruta', error.message);
     } finally {
       setLoadingRoute(false);
-    }
-  };
-
-  const selectRoute = (index) => {
-    setSelectedRoute(index);
-    setShowStepsList(false);
-    if (mapRef.current && routes[index]) {
-      mapRef.current.fitToCoordinates(routes[index].coords, {
-        edgePadding: { top: 160, right: 60, bottom: 260, left: 60 },
-        animated: true,
-      });
     }
   };
 
@@ -218,32 +222,23 @@ export default function App() {
     setResults([]);
   };
 
+  const centerOnUser = () => {
+    postToMap('window.centerOnUser()');
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
 
-      <MapView
-        ref={mapRef}
+      <WebView
+        ref={webViewRef}
+        source={{ html: MAP_HTML }}
         style={styles.map}
-        initialRegion={INITIAL_REGION}
-        showsUserLocation
-        followsUserLocation={false}
-        onLongPress={handleLongPress}
-      >
-        {routes.map((route, index) => (
-          <Polyline
-            key={`route-${index}`}
-            coordinates={route.coords}
-            strokeWidth={index === selectedRoute ? 6 : 3}
-            strokeColor={index === selectedRoute ? '#2980b9' : '#b0bec5'}
-            tappable
-            onPress={() => selectRoute(index)}
-          />
-        ))}
-        {destination && (
-          <Marker coordinate={destination} title="Destino" pinColor="#e74c3c" />
-        )}
-      </MapView>
+        originWhitelist={['*']}
+        javaScriptEnabled
+        domStorageEnabled
+        onMessage={handleMapMessage}
+      />
 
       <View style={styles.searchBox}>
         <TextInput
@@ -314,7 +309,10 @@ export default function App() {
                   styles.routeOption,
                   index === selectedRoute && styles.routeOptionActive,
                 ]}
-                onPress={() => selectRoute(index)}
+                onPress={() => {
+                  setSelectedRoute(index);
+                  setShowStepsList(false);
+                }}
               >
                 <Text
                   style={[
@@ -381,11 +379,16 @@ export default function App() {
           </Text>
         )}
 
-        {routes.length > 0 && (
-          <TouchableOpacity style={styles.button} onPress={clearRoute}>
-            <Text style={styles.buttonText}>Limpiar ruta</Text>
+        <View style={styles.buttonRow}>
+          <TouchableOpacity style={styles.secondaryButton} onPress={centerOnUser}>
+            <Text style={styles.secondaryButtonText}>Centrar en mí</Text>
           </TouchableOpacity>
-        )}
+          {routes.length > 0 && (
+            <TouchableOpacity style={styles.button} onPress={clearRoute}>
+              <Text style={styles.buttonText}>Limpiar ruta</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
     </View>
   );
@@ -571,8 +574,13 @@ const styles = StyleSheet.create({
     color: '#c0392b',
     marginBottom: 8,
   },
-  button: {
+  buttonRow: {
+    flexDirection: 'row',
+    gap: 8,
     marginTop: 10,
+  },
+  button: {
+    flex: 1,
     backgroundColor: '#2980b9',
     borderRadius: 10,
     paddingVertical: 10,
@@ -580,6 +588,18 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#fff',
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  secondaryButton: {
+    flex: 1,
+    backgroundColor: '#ecf0f1',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  secondaryButtonText: {
+    color: '#2c3e50',
     fontWeight: '600',
     fontSize: 14,
   },

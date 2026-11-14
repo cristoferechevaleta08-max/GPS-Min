@@ -5,6 +5,7 @@ App móvil (React Native + Expo) que muestra tu ubicación en el mapa, calcula *
 ## Funciones
 
 - 📍 Muestra tu ubicación actual en tiempo real (GPS).
+- 🗺️ Mapa con OpenStreetMap (Leaflet): sin llaves de API, sin cuentas y sin costos.
 - 🔍 Busca destinos por dirección (geocoding con Nominatim/OpenStreetMap) o mantén presionado el mapa para marcar uno.
 - 🗺️ Calcula hasta 3 rutas alternativas (OSRM) y elige la que prefieras tocándola en el mapa o en las tarjetas inferiores.
 - 🧭 Modo navegación: indicación actual en pantalla y lista completa de pasos ("gira a la derecha en…", distancias, glorieta, salidas, etc.).
@@ -41,6 +42,7 @@ Al terminar, EAS te da un enlace para descargar el `.apk` e instalarlo en cualqu
 ## Cómo funcionan las rutas
 
 - Se envían tu ubicación y el destino al servidor público de [OSRM](https://project-osrm.org/) con `alternatives=2` y `steps=true`.
+- El mapa usa [Leaflet](https://leafletjs.com/) sobre teselas de OpenStreetMap dentro de un WebView; la app se comunica con él por mensajes (ubicación, rutas, destino) y el mapa responde con toques y mantenimientos de presión.
 - Cada ruta incluye sus indicaciones de maniobra traducidas a español y se dibuja en el mapa (la seleccionada en azul, las demás en gris).
 - La indicación "actual" se estima con el punto de maniobra más cercano a tu posición GPS.
 
@@ -51,7 +53,8 @@ La app muestra **rutas alternativas** para que elijas la que prefieras. Una sele
 ## Estructura
 
 ```
-App.js           Pantalla principal (mapa, búsqueda, rutas y pasos)
+App.js           Pantalla principal (búsqueda, rutas, navegación y pasos)
+src/mapHtml.js   Mapa Leaflet + OpenStreetMap (WebView)
 src/routing.js   Cliente OSRM, indicaciones y utilidades de formato
 src/geocoding.js Búsqueda de direcciones (Nominatim)
 app.json         Configuración de Expo y permisos
